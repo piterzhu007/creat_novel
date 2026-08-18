@@ -137,10 +137,11 @@ def create_novel_agent(
         conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
         checkpointer = SqliteSaver(conn)
 
-    # 配置本地文件系统 backend，让内置 read_file/ls/glob 工具能访问本地文件
-    # （否则默认虚拟文件系统，读不到 D:\... 路径下的 txt 文档）
+    # 配置本地文件系统 backend，让内置 read_file/ls/glob 工具能访问本地文件。
+    # 关键：virtual_mode=False —— 否则 Windows 绝对路径（D:\...）会被当作虚拟路径
+    # 拼接（"/" + "D:\..."）导致读取失败。False 时绝对路径和相对路径都直接可用。
     from deepagents.backends.filesystem import FilesystemBackend
-    fs_backend = FilesystemBackend(root_dir=str(PROJECT_ROOT))
+    fs_backend = FilesystemBackend(root_dir=str(PROJECT_ROOT), virtual_mode=False)
 
     # supervisor 是主 agent，拥有全部工具（统筹全局）
     agent = create_deep_agent(

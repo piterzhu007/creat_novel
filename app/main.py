@@ -208,17 +208,19 @@ class NovelCreationCLI:
 
     def _resolve_input(self, raw_input: str) -> str:
         """
-        解析用户输入：若包含文档路径，读取文档内容。
+        解析用户输入：提取其中的文档路径，读取文件内容后注入。
 
-        支持两种形式：
-        1. 纯路径输入：直接输入 "output/大纲.txt" 或 "./需求.md"
-        2. @路径语法：输入 "@./需求.txt 帮我创作这部小说"
+        支持：
+        1. 纯路径输入：整条输入就是一个文档路径
+        2. @路径语法：@./需求.txt 帮我创作
+        3. 多路径混合：输入中含多个 .txt/.md 路径（含 Windows 绝对路径），全部读取后注入
         """
+        import re
+
         stripped = raw_input.strip()
 
         # 形式 1：@路径 语法（可选后跟附加说明）
         if stripped.startswith("@"):
-            # 拆出第一个 token 作为路径，其余作为附加说明
             parts = stripped[1:].split(None, 1)
             path_str = parts[0].strip().strip('"').strip("'")
             extra = parts[1].strip() if len(parts) > 1 else ""
@@ -226,13 +228,60 @@ class NovelCreationCLI:
                 doc_content = read_document(path_str)
             except (FileNotFoundError, ValueError) as e:
                 print(f"\n⚠️ {e}")
-                return raw_input  # 回退：原样当作普通输入
-
+                return raw_input
             if extra:
                 return f"以下是我提供的文档内容（来自 {path_str}）:\n\n{doc_content}\n\n我的要求：{extra}"
             return f"以下是我提供的文档内容（来自 {path_str}）:\n\n{doc_content}"
 
-        # 形式 2：纯路径输入（整条输入就是一个文档路径）
+        # 形式 2：从输入中提取所有文档路径（支持 Windows 绝对路径 + 相对路径）
+        # 关键：用户粘贴的路径常粘连（如 "...设定.txtD:\...问题.txt"），
+        # 用「盘符开头 + 文件后缀结尾」精确提取每个完整路径。
+        found_files = []
+        seen = set()
+
+        # 2a. 先按盘符切分 Windows 绝对路径（处理粘连场景）
+        if re.search(r'[A-Za-z]:[\\/]', stripped):
+            # 用盘符作为分隔符切分，每个片段是一个完整路径的候选
+            segments = re.split(r'(?=[A-Za-z]:[\\/])', stripped)
+            for seg in segments:
+                seg = seg.strip()
+                m = re.match(r'([A-Za-z]:[\\/].*?\.(?:txt|md|markdown))', seg)
+                if m:
+                    p = resolve_document_path(m.group(1))
+                    if p is not None and str(p) not in seen:
+                        seen.add(str(p))
+                        try:
+                            found_files.append((str(p), read_document(str(p))))
+                        except (FileNotFoundError, ValueError):
+                            pass
+
+        # 2b. 再匹配相对路径 / 残留的 .txt 路径
+        for m in re.findall(r'([^\s"\'，。；：]+\.(?:txt|md|markdown))', stripped):
+            p = resolve_document_path(m)
+            if p is not None and str(p) not in seen:
+                seen.add(str(p))
+                try:
+                    found_files.append((str(p), read_document(str(p))))
+                except (FileNotFoundError, ValueError):
+                    pass
+
+        if found_files:
+            # 去掉输入中已识别的路径部分，剩下的作为指令
+            remaining = stripped
+            for path, _ in found_files:
+                remaining = remaining.replace(path, " ")
+            remaining = remaining.strip()
+
+            parts = []
+            for path, content in found_files:
+                parts.append(f"【文档】{path}\n{content}")
+            doc_block = "\n\n".join(parts)
+
+            if remaining:
+                return f"以下是用户提供的文档内容：\n\n{doc_block}\n\n【用户要求】{remaining}"
+            return f"以下是用户提供的文档内容：\n\n{doc_block}"
+
+        # 形式 3：纯路径输入（整条就是一个文档路径）
         doc_path = resolve_document_path(stripped)
         if doc_path is not None:
             doc_content = read_document(str(doc_path))
