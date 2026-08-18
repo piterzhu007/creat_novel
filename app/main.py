@@ -333,65 +333,47 @@ class NovelCreationCLI:
 
     def _handle_stream(self, user_content: str, config: dict):
         """
-        处理工作流执行结果。
+        处理 deep agent 的执行结果。
 
-        新架构：workflow 是显式 StateGraph，节点产出写入共享状态。
-        执行完后从 state 提取正文和报告展示给用户。
+        deepagents 架构：supervisor 是主 agent，通过 task 委派子智能体，
+        结果都在 messages 里。这里提取最后一条 AI 消息展示给用户。
         """
-        # 工作流输入：用户消息 + 需求描述
-        from langchain_core.messages import HumanMessage
-        initial_state = {
-            "messages": [HumanMessage(content=user_content)],
-            "requirements": user_content,
-        }
+        from langchain_core.messages import HumanMessage, AIMessage
 
         print()  # 空行分隔
 
         try:
-            result = self.graph.invoke(initial_state, config)
+            result = self.graph.invoke(
+                {"messages": [HumanMessage(content=user_content)]},
+                config,
+            )
         except Exception as e:
             logger.error(f"工作流执行出错: {e}")
             print(f"\n⚠️ 处理出错: {e}")
             return
 
-        # 展示产出
-        writer_output = result.get("writer_output", "")
-        if writer_output:
+        # 提取最后一条 AI 消息（supervisor 的最终回复）
+        messages = result.get("messages", [])
+        last_ai = None
+        for m in reversed(messages):
+            if isinstance(m, AIMessage) and m.content:
+                last_ai = m
+                break
+
+        if last_ai and last_ai.content:
+            content = last_ai.content
             print("=" * 60)
-            print("📖 正文产出：")
+            print("📖 回复：")
             print("=" * 60)
-            print(writer_output[:3000])
-            if len(writer_output) > 3000:
-                print(f"\n... (共 {len(writer_output)} 字符，已截断)")
+            if len(content) > 3000:
+                print(content[:3000])
+                print(f"\n... (共 {len(content)} 字符，已截断)")
+            else:
+                print(content)
 
             # 保存产出
-            output_path = self._save_output(writer_output)
-            print(f"\n💾 正文已保存至: {output_path}")
-
-        # 展示审核报告
-        editor_report = result.get("editor_report")
-        if editor_report:
-            score = editor_report.get("overall_score", "?")
-            print(f"\n📝 编辑评分: {score}/10")
-            issues = editor_report.get("issues", [])
-            if issues:
-                print("问题:")
-                for i, issue in enumerate(issues[:5], 1):
-                    print(f"  {i}. {issue}")
-
-        reader_report = result.get("reader_report")
-        if reader_report:
-            is_ok = reader_report.get("is_consistent", True)
-            status = "✅ 一致" if is_ok else "⚠️ 发现不一致"
-            print(f"\n👁️ 读者检查: {status}")
-
-        # 展示设计结果摘要
-        if not writer_output and result.get("characters"):
-            chars = result.get("characters", [])
-            worlds = result.get("world_settings", [])
-            outlines = result.get("outlines", [])
-            print(f"\n🏗️ 设计完成：")
-            print(f"  {len(chars)} 个人物，{len(worlds)} 条世界观，{len(outlines)} 章大纲")
+            output_path = self._save_output(content)
+            print(f"\n💾 产出已保存至: {output_path}")
 
         print()
 

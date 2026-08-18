@@ -50,14 +50,14 @@ class TestNovelMemoryTools:
 
 
 class TestWorkflowIntegration:
-    """工作流集成测试（LangGraph 显式架构）"""
+    """工作流集成测试（deepagents 架构）"""
 
-    @patch("app.workflow.LongTermMemory")
-    @patch("app.workflow.ShortTermMemory")
-    @patch("app.workflow.VectorStore")
+    @patch("app.agent.LongTermMemory")
+    @patch("app.agent.ShortTermMemory")
+    @patch("app.agent.VectorStore")
     def test_build_workflow(self, mock_vs, mock_stm, mock_ltm):
-        """测试构建 LangGraph 工作流"""
-        from app.workflow import build_workflow
+        """测试构建 deep agent 工作流"""
+        from app.workflow import create_novel_workflow
         from app.core.model_client import reset_model_registry
 
         mock_ltm.return_value = MagicMock()
@@ -65,22 +65,22 @@ class TestWorkflowIntegration:
         mock_vs.return_value = MagicMock()
         reset_model_registry()
 
-        graph = build_workflow(checkpoint_db_path=None)
+        graph = create_novel_workflow(checkpoint_db_path=None)
         nodes = list(graph.get_graph().nodes.keys())
-        # 父图含 supervisor 子图和 create_novel 节点；子 agent 在 supervisor 内部
-        assert "supervisor" in nodes
-        assert "create_novel" in nodes
+        # deepagents 图含 model/tools 节点
+        assert "model" in nodes
+        assert "tools" in nodes
 
 
 class TestDeepAgent:
     """工作流创建测试"""
 
-    @patch("app.workflow.LongTermMemory")
-    @patch("app.workflow.ShortTermMemory")
-    @patch("app.workflow.VectorStore")
+    @patch("app.agent.LongTermMemory")
+    @patch("app.agent.ShortTermMemory")
+    @patch("app.agent.VectorStore")
     def test_create_workflow_compiles(self, mock_vs, mock_stm, mock_ltm):
-        """测试创建 LangGraph 工作流并编译成功"""
-        from app.workflow import build_workflow
+        """测试创建 deep agent 工作流并编译成功"""
+        from app.workflow import create_novel_workflow
         from app.core.model_client import reset_model_registry
         from langgraph.graph.state import CompiledStateGraph
 
@@ -89,15 +89,15 @@ class TestDeepAgent:
         mock_vs.return_value = MagicMock()
         reset_model_registry()
 
-        graph = build_workflow(checkpoint_db_path=None)
+        graph = create_novel_workflow(checkpoint_db_path=None)
         assert isinstance(graph, CompiledStateGraph)
 
-    @patch("app.workflow.LongTermMemory")
-    @patch("app.workflow.ShortTermMemory")
-    @patch("app.workflow.VectorStore")
+    @patch("app.agent.LongTermMemory")
+    @patch("app.agent.ShortTermMemory")
+    @patch("app.agent.VectorStore")
     def test_graph_has_nodes(self, mock_vs, mock_stm, mock_ltm):
-        """测试 Graph 包含所有节点"""
-        from app.workflow import build_workflow
+        """测试 Graph 包含 ReAct 循环节点"""
+        from app.workflow import create_novel_workflow
         from app.core.model_client import reset_model_registry
 
         mock_ltm.return_value = MagicMock()
@@ -105,10 +105,10 @@ class TestDeepAgent:
         mock_vs.return_value = MagicMock()
         reset_model_registry()
 
-        graph = build_workflow(checkpoint_db_path=None)
+        graph = create_novel_workflow(checkpoint_db_path=None)
         nodes = list(graph.get_graph().nodes.keys())
-        assert "create_novel" in nodes
-        assert "supervisor" in nodes
+        assert "model" in nodes
+        assert "tools" in nodes
 
 
 class TestConfig:
