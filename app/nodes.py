@@ -46,12 +46,14 @@ def create_novel_node(ctx: NodeContext):
     """创建小说项目节点（流程节点）"""
     def node(state: NovelState) -> dict:
         user_msg = _get_last_user_message(state)
-        title = state.get("novel_title", "")
+        title = state.get("novel_title", "").strip()
+
+        # 标题优先级：state 显式传入 > 从用户输入智能提取 > 占位符
         if not title:
-            title = user_msg[:30] or f"未命名小说_{datetime.utcnow().strftime('%Y%m%d')}"
+            title = _extract_title(user_msg)
 
         genre = state.get("novel_genre", "")
-        synopsis = state.get("novel_synopsis", user_msg[:200])
+        synopsis = state.get("novel_synopsis", user_msg[:500])
         target = state.get("target_chapters", 0)
 
         novel_id = ctx.ltm.create_novel(title, genre, synopsis, target)
@@ -65,6 +67,32 @@ def create_novel_node(ctx: NodeContext):
             "target_chapters": target,
         }
     return node
+
+
+def _extract_title(user_msg: str) -> str:
+    """从用户输入智能提取小说标题，避免路径/长文本污染"""
+    import re
+
+    # 若输入是文档路径或包含"请创作/写"等指令，用占位符而非截断
+    if not user_msg:
+        return f"未命名小说_{datetime.utcnow().strftime('%Y%m%d')}"
+
+    # 尝试提取「书名号」中的标题：《xxx》
+    m = re.search(r'《(.+?)》', user_msg)
+    if m:
+        return m.group(1).strip()[:50]
+
+    # 尝试提取「叫做/叫/名为 xxx」的标题
+    m = re.search(r'(?:叫做|叫|名为|题目是)\s*[:：]?\s*(.{2,30}?)(?:[，。！？\n]|$)', user_msg)
+    if m:
+        return m.group(1).strip()[:50]
+
+    # 兜底：截取第一行前 20 字，但剔除路径特征
+    first_line = user_msg.split("\n")[0].strip()
+    # 若看起来像路径（含盘符或斜杠），用占位符
+    if re.search(r'[A-Za-z]:[\\/]|^[\\/]', first_line):
+        return f"未命名小说_{datetime.utcnow().strftime('%Y%m%d')}"
+    return first_line[:20] or f"未命名小说_{datetime.utcnow().strftime('%Y%m%d')}"
 
 
 def advance_node(ctx: NodeContext):

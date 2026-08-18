@@ -23,8 +23,6 @@ from app.state import NovelState
 from app.nodes import (
     NodeContext,
     create_novel_node,
-    advance_node,
-    handle_error_node,
 )
 from app.core.model_client import get_model_registry
 from app.memory import LongTermMemory, ShortTermMemory, VectorStore
@@ -138,20 +136,11 @@ def build_workflow(
 
     builder = StateGraph(NovelState)
     builder.add_node("create_novel", create_novel_node(ctx))
-    builder.add_node("supervisor", supervisor_graph)  # supervisor 子图
-    builder.add_node("advance", advance_node(ctx))
-    builder.add_node("handle_error", handle_error_node(ctx))
+    builder.add_node("supervisor", supervisor_graph)  # supervisor 子图（内部含完整 handoff 循环）
 
     builder.add_edge(START, "create_novel")
     builder.add_edge("create_novel", "supervisor")
-
-    # supervisor 完成后结束（其内部的 handoff 已处理子 agent 调用）
-    builder.add_conditional_edges("supervisor", _after_supervisor, {
-        "advance": "advance",
-        "handle_error": "handle_error",
-    })
-    builder.add_edge("advance", "supervisor")  # 推进后回到 supervisor 继续下一章
-    builder.add_edge("handle_error", END)
+    builder.add_edge("supervisor", END)  # supervisor 子图内部自行完成全流程
 
     # 编译
     if checkpoint_db_path:
@@ -164,17 +153,6 @@ def build_workflow(
         logger.info("工作流已编译（无 checkpoint）")
 
     return graph
-
-
-def _after_supervisor(state: NovelState) -> str:
-    """supervisor 子图执行完后，根据状态决定是否推进章节"""
-    # 若一章已完成审核（有终稿产出），进入 advance 推进；否则结束
-    if state.get("latest_chapter_content") and state.get("reader_report"):
-        return "advance"
-    if state.get("error"):
-        return "handle_error"
-    # 默认结束（supervisor 内部已自行循环调度）
-    return "handle_error"
 
 
 def create_novel_workflow(checkpoint_db_path: Optional[str] = None):
