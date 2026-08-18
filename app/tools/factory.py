@@ -272,6 +272,20 @@ class NovelMemoryTools:
 
     # ─── 管理工具 ──────────────────────────────────────
 
+    def _create_novel(self, title: str, genre: str = "", synopsis: str = "",
+                      target_chapters: int = 0) -> str:
+        """
+        创建一个新的小说项目，返回 novel_id。
+
+        参数:
+            title: 小说标题
+            genre: 小说类型/流派（如玄幻、都市、科幻）
+            synopsis: 小说简介
+            target_chapters: 目标章节数
+        """
+        novel_id = self._ltm.create_novel(title, genre, synopsis, target_chapters)
+        return f"小说已创建: {title} (novel_id={novel_id})"
+
     def _list_novels(self) -> str:
         """列出所有已创建的小说项目"""
         novels = self._ltm.list_novels()
@@ -489,4 +503,6 @@ class NovelMemoryTools:
         t15.name = "get_novel_state"
         t16 = tool(self._update_novel_progress)
         t16.name = "update_novel_progress"
-        return [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16]
+        t17 = tool(self._create_novel)
+        t17.name = "create_novel"
+        return [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17]

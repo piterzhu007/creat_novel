@@ -382,46 +382,41 @@ class NovelCreationCLI:
 
     def _handle_stream(self, user_content: str, config: dict):
         """
-        处理 deep agent 的执行结果。
+        流式处理 deep agent 的执行结果。
 
-        deepagents 架构：supervisor 是主 agent，通过 task 委派子智能体，
-        结果都在 messages 里。这里提取最后一条 AI 消息展示给用户。
+        使用 stream_mode="messages" 逐 token 打印主智能体的回复，
+        让用户实时看到进度。同时累积完整内容用于保存产出。
         """
-        from langchain_core.messages import HumanMessage, AIMessage
+        from langchain_core.messages import HumanMessage, AIMessageChunk
 
         print()  # 空行分隔
 
+        accumulated = []  # 累积 AI 文本
+
         try:
-            result = self.graph.invoke(
+            for chunk, _metadata in self.graph.stream(
                 {"messages": [HumanMessage(content=user_content)]},
                 config,
-            )
+                stream_mode="messages",
+            ):
+                # 只打印 AI 文本 token（跳过工具调用等内部消息）
+                if isinstance(chunk, AIMessageChunk):
+                    content = chunk.content
+                    if content:
+                        print(content, end="", flush=True)
+                        accumulated.append(content)
         except Exception as e:
             logger.error(f"工作流执行出错: {e}")
             print(f"\n⚠️ 处理出错: {e}")
             return
 
-        # 提取最后一条 AI 消息（supervisor 的最终回复）
-        messages = result.get("messages", [])
-        last_ai = None
-        for m in reversed(messages):
-            if isinstance(m, AIMessage) and m.content:
-                last_ai = m
-                break
+        # 流式结束后换行
+        print()
 
-        if last_ai and last_ai.content:
-            content = last_ai.content
-            print("=" * 60)
-            print("📖 回复：")
-            print("=" * 60)
-            if len(content) > 3000:
-                print(content[:3000])
-                print(f"\n... (共 {len(content)} 字符，已截断)")
-            else:
-                print(content)
-
-            # 保存产出
-            output_path = self._save_output(content)
+        # 保存完整产出
+        full_content = "".join(accumulated).strip()
+        if full_content:
+            output_path = self._save_output(full_content)
             print(f"\n💾 产出已保存至: {output_path}")
 
         print()
