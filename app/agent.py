@@ -137,6 +137,11 @@ def create_novel_agent(
         conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
         checkpointer = SqliteSaver(conn)
 
+    # 配置本地文件系统 backend，让内置 read_file/ls/glob 工具能访问本地文件
+    # （否则默认虚拟文件系统，读不到 D:\... 路径下的 txt 文档）
+    from deepagents.backends.filesystem import FilesystemBackend
+    fs_backend = FilesystemBackend(root_dir=str(PROJECT_ROOT))
+
     # supervisor 是主 agent，拥有全部工具（统筹全局）
     agent = create_deep_agent(
         model=registry.get_model("supervisor"),
@@ -144,6 +149,7 @@ def create_novel_agent(
         system_prompt=SUPERVISOR_PROMPT,
         subagents=sub_agents,
         checkpointer=checkpointer,
+        backend=fs_backend,
         name="novel_supervisor",
     )
 
