@@ -20,6 +20,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from loguru import logger
 
 from app.core.model_client import get_model_registry
+from app.core.config import PROJECT_ROOT
 from app.memory import LongTermMemory, ShortTermMemory, VectorStore
 from app.prompts import (
     SUPERVISOR_PROMPT,
@@ -76,12 +77,14 @@ def _build_sub_agents(memory_tools: NovelMemoryTools, registry) -> list[SubAgent
             "system_prompt": WRITER_PROMPT,
             "model": registry.get_model("writer"),
             "tools": writer_tools,
+            # 为撰写者配备写作风格 skill（人物/环境/语言/动作描写方法论）
+            "skills": [str(PROJECT_ROOT / "skills" / "writing-style")],
         },
         {
             "name": "editor",
             "description": (
-                "资深出版社编辑，审核章节质量，从合理性、吸引力、价值观维度评分。"
-                "在章节完成后需要质量评估时调用。"
+                "资深出版社编辑，审核章节质量和大纲，从合理性、吸引力、价值观维度评分。"
+                "在制定大纲和章节完成后需要质量评估时调用。"
             ),
             "system_prompt": EDITOR_PROMPT,
             "model": registry.get_model("editor"),
