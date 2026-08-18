@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# 环境变量和密钥
+.env
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 本地数据
+data/*.db
+data/*.sqlite3
+data/novels/*
+data/vector_db/*
+!data/novels/.gitkeep
+!data/vector_db/.gitkeep
+
+# 智能体产出
+output/
+
+# 日志
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 构建
+node_modules/

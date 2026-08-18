@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(DEEPSEEK_API_KEY=test-key PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(DEEPSEEK_API_KEY=\"test-key\" PYTHONIOENCODING=utf-8 python -m pytest tests/ -q --tb=short)"
+    ]
+  }
+}
