@@ -98,6 +98,74 @@ class LongTermMemory:
                 novel.updated_at = datetime.utcnow()
                 session.commit()
 
+    def update_novel_progress(self, novel_id: str, current_chapter: int):
+        """更新小说生成进度（当前章节序号）"""
+        with self.get_session() as session:
+            novel = session.query(Novel).filter(Novel.novel_id == novel_id).first()
+            if novel:
+                novel.current_chapter = current_chapter
+                novel.updated_at = datetime.utcnow()
+                session.commit()
+                logger.info(f"小说进度已更新: {novel.title} 第{current_chapter}章")
+
+    def get_full_state(self, novel_id: str) -> dict:
+        """
+        获取小说的「全局状态中枢」完整快照。
+
+        一次性返回世界观、人物、大纲、章节、进度、校验记录等所有
+        与生成任务相关的重要数据，供任何智能体读取全局状态。
+
+        返回 dict（标准化格式），各字段对工作流中所有智能体共享。
+        """
+        novel = self.get_novel(novel_id)
+        if not novel:
+            return {}
+
+        state = {
+            "novel_id": novel.novel_id,
+            "title": novel.title,
+            "genre": novel.genre or "",
+            "synopsis": novel.synopsis or "",
+            "status": novel.status,
+            "target_chapters": novel.target_chapters,
+            "current_chapter": novel.current_chapter,
+            # 世界观设定
+            "world_settings": [
+                {
+                    "setting_id": s.setting_id,
+                    "category": s.category or "",
+                    "name": s.name,
+                    "description": s.description or "",
+                }
+                for s in self.get_world_settings(novel_id)
+            ],
+            # 人物档案
+            "characters": [
+                {
+                    "char_id": c.char_id,
+                    "name": c.name,
+                    "role_type": c.role_type,
+                    "personality": c.personality,
+                    "motivation": c.motivation,
+                }
+                for c in self.get_characters(novel_id)
+            ],
+            # 大纲目录
+            "outlines": [
+                {
+                    "outline_id": o.outline_id,
+                    "chapter_seq": o.chapter_seq,
+                    "title": o.title,
+                    "summary": o.summary or "",
+                    "status": o.status,
+                }
+                for o in self.get_outlines(novel_id)
+            ],
+            # 校验环节历史记录（写作问题库）
+            "writing_issues": self.get_writing_issues(novel_id, status="open"),
+        }
+        return state
+
     # ═══════════════════════════════════════════════════════
     # 人物 CRUD
     # ═══════════════════════════════════════════════════════

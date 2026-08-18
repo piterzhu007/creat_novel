@@ -18,7 +18,7 @@ class TestNovelMemoryTools:
         vs = VectorStore()
         factory = NovelMemoryTools(ltm, stm, vs)
         tools = factory.get_tools()
-        assert len(tools) == 14
+        assert len(tools) == 16
 
     def test_tool_names(self):
         """测试所有工具名称正确"""
@@ -44,6 +44,8 @@ class TestNovelMemoryTools:
             "get_writing_issues",
             "export_chapters",
             "get_story_bible",
+            "get_novel_state",
+            "update_novel_progress",
         ]
         for name in expected:
             assert name in tool_names, f"工具 {name} 未在列表中找到"
@@ -181,7 +183,7 @@ class TestMCPIntegration:
         from app.mcp.tools import get_tool_registry
         registry = get_tool_registry()
         tools = registry.all_tools
-        assert len(tools) == 14
+        assert len(tools) == 16
 
     def test_tool_groups(self):
         """测试工具分组"""

@@ -67,6 +67,7 @@ class Novel(Base):
     synopsis: Mapped[str] = mapped_column(Text, default="", comment="小说简介")
     status: Mapped[str] = mapped_column(String(32), default=NovelStatus.PLANNING.value, comment="小说状态")
     target_chapters: Mapped[int] = mapped_column(Integer, default=0, comment="目标章节数")
+    current_chapter: Mapped[int] = mapped_column(Integer, default=0, comment="当前生成进度（章节序号，0=未开始）")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -397,6 +397,62 @@ class NovelMemoryTools:
 
         return "\n".join(lines)
 
+    # ─── 全局状态中枢工具 ──────────────────────────────
+
+    def _get_novel_state(self, novel_id: str) -> str:
+        """
+        获取小说的「全局状态中枢」完整快照。
+
+        一次性返回世界观、人物、大纲、当前进度、校验历史等所有
+        与生成任务相关的数据，供任何智能体读取全局共享状态。
+
+        参数:
+            novel_id: 小说ID
+        """
+        state = self._ltm.get_full_state(novel_id)
+        if not state:
+            return "未找到该小说"
+
+        lines = [
+            f"# 小说全局状态：《{state['title']}》",
+            f"类型：{state['genre']}",
+            f"状态：{state['status']}",
+            f"进度：第 {state['current_chapter']} / {state['target_chapters']} 章",
+        ]
+
+        if state.get("world_settings"):
+            lines.append(f"\n## 世界观设定（{len(state['world_settings'])} 条）")
+            for s in state["world_settings"]:
+                lines.append(f"- {s['name']}：{s['description'][:60]}")
+
+        if state.get("characters"):
+            lines.append(f"\n## 人物档案（{len(state['characters'])} 个）")
+            for c in state["characters"]:
+                lines.append(f"- {c['name']}（{c['role_type']}）：{c['personality'][:40]}")
+
+        if state.get("outlines"):
+            lines.append(f"\n## 大纲目录（{len(state['outlines'])} 章）")
+            for o in state["outlines"]:
+                lines.append(f"- 第{o['chapter_seq']}章《{o['title']}》")
+
+        if state.get("writing_issues"):
+            lines.append(f"\n## 校验历史（{len(state['writing_issues'])} 条未解决问题）")
+            for i in state["writing_issues"][:5]:
+                lines.append(f"- [{i['issue_type']}] {i['description'][:50]}")
+
+        return "\n".join(lines)
+
+    def _update_novel_progress(self, novel_id: str, current_chapter: int) -> str:
+        """
+        更新小说的生成进度（当前章节序号）。
+
+        参数:
+            novel_id: 小说ID
+            current_chapter: 当前章节序号
+        """
+        self._ltm.update_novel_progress(novel_id, current_chapter)
+        return f"进度已更新：第 {current_chapter} 章"
+
     # ─── 工具列表导出 ──────────────────────────────────
 
     def get_tools(self) -> list:
@@ -429,4 +485,8 @@ class NovelMemoryTools:
         t13.name = "export_chapters"
         t14 = tool(self._get_story_bible)
         t14.name = "get_story_bible"
-        return [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14]
+        t15 = tool(self._get_novel_state)
+        t15.name = "get_novel_state"
+        t16 = tool(self._update_novel_progress)
+        t16.name = "update_novel_progress"
+        return [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16]
