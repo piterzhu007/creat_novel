@@ -67,11 +67,10 @@ class TestWorkflowIntegration:
 
         graph = build_workflow(checkpoint_db_path=None)
         nodes = list(graph.get_graph().nodes.keys())
+        # 父图含 supervisor 子图和流程节点；子 agent 在 supervisor 内部
         assert "supervisor" in nodes
-        assert "architect" in nodes
-        assert "writer" in nodes
-        assert "editor" in nodes
-        assert "reader" in nodes
+        assert "create_novel" in nodes
+        assert "advance" in nodes
 
 
 class TestDeepAgent:
@@ -110,7 +109,7 @@ class TestDeepAgent:
         graph = build_workflow(checkpoint_db_path=None)
         nodes = list(graph.get_graph().nodes.keys())
         assert "create_novel" in nodes
-        assert "writer" in nodes
+        assert "supervisor" in nodes
 
 
 class TestConfig:

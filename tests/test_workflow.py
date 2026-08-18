@@ -26,9 +26,8 @@ class TestWorkflow:
         assert graph is not None
 
         nodes = list(graph.get_graph().nodes.keys())
-        # 验证所有节点都已注册（supervisor 模式）
-        for node in ["create_novel", "supervisor", "architect", "writer",
-                     "editor", "reader", "advance", "handle_error"]:
+        # 父图只含流程节点 + supervisor 子图；子 agent 在 supervisor 内部
+        for node in ["create_novel", "supervisor", "advance", "handle_error"]:
             assert node in nodes, f"节点 {node} 未注册"
 
     @patch("app.workflow.LongTermMemory")
