@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="text-embedding-v3", alias="EMBEDDING_MODEL")
 
     # ── 智能体温度 ──
-    architect_temperature: float = Field(default=1.0, alias="ARCHITECT_TEMPERATURE")
+    architect_temperature: float = Field(default=1.5, alias="ARCHITECT_TEMPERATURE")
     writer_temperature: float = Field(default=0.8, alias="WRITER_TEMPERATURE")
     editor_temperature: float = Field(default=0.2, alias="EDITOR_TEMPERATURE")
     reader_temperature: float = Field(default=0.5, alias="READER_TEMPERATURE")
@@ -85,12 +85,13 @@ class Settings(BaseSettings):
     # writer 写正文需要最大输出；editor/reader 只出报告，可设小值省成本
     architect_max_tokens: int = Field(default=200000, alias="ARCHITECT_MAX_TOKENS")
     writer_max_tokens: int = Field(default=200000, alias="WRITER_MAX_TOKENS")
-    editor_max_tokens: int = Field(default=8192, alias="EDITOR_MAX_TOKENS")
-    reader_max_tokens: int = Field(default=8192, alias="READER_MAX_TOKENS")
-    supervisor_max_tokens: int = Field(default=8192, alias="SUPERVISOR_MAX_TOKENS")
+    editor_max_tokens: int = Field(default=16384, alias="EDITOR_MAX_TOKENS")
+    reader_max_tokens: int = Field(default=16384, alias="READER_MAX_TOKENS")
+    supervisor_max_tokens: int = Field(default=16384, alias="SUPERVISOR_MAX_TOKENS")
 
     # ── 存储路径 ──
     sqlite_db_path: str = Field(default="data/novels.db", alias="SQLITE_DB_PATH")
+    short_term_db_path: str = Field(default="data/short_term.db", alias="SHORT_TERM_DB_PATH")
     chroma_db_path: str = Field(default="data/vector_db/", alias="CHROMA_DB_PATH")
 
     # ── 日志 ──
@@ -138,3 +139,9 @@ def get_chroma_path() -> Path:
     """获取 ChromaDB 持久化目录的绝对路径"""
     settings = get_settings()
     return _resolve_path(settings.chroma_db_path)
+
+
+def get_short_term_db_path() -> Path:
+    """获取短期记忆 SQLite 数据库的绝对路径"""
+    settings = get_settings()
+    return _resolve_path(settings.short_term_db_path)

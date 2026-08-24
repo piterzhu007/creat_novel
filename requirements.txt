@@ -9,8 +9,8 @@ langchain-deepseek>=0.1
 langgraph>=1.0,<2
 langgraph-checkpoint-sqlite>=2.0,<4
 
-# DeepAgents（智能体框架）
-deepagents>=0.7
+# DeepAgents（智能体框架）—— pin 上限，私有 API 依赖 0.7.x 内部实现
+deepagents>=0.7,<0.8
 
 # Embedding
 dashscope>=1.0
@@ -21,8 +21,8 @@ SQLAlchemy>=2.0
 aiosqlite>=0.20
 
 # MCP
-mcp>=1.0
-langchain-mcp-adapters>=0.2
+mcp>=1.29,<2
+langchain-mcp-adapters>=0.3,<0.4
 
 # 配置
 python-dotenv>=1.0

@@ -267,6 +267,10 @@ class ModelRegistry:
             base_url=slot.base_url or None,
             temperature=temperature,
             max_tokens=max_tokens,
+            # 禁用流式 chunk 超时：architect 读 20 万 token 源文档后单次生成超长
+            # 结构化设定时，服务端可能在中途停顿 >120s（TCP 仍活着但暂不吐 chunk），
+            # 默认的 120s 超时会误报「No streaming chunk received」中断任务。
+            stream_chunk_timeout=None,
         )
         logger.info(
             f"模型实例已创建: [{slot.name}] {slot.identifier} "

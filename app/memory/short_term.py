@@ -13,7 +13,7 @@ from loguru import logger
 from sqlalchemy import create_engine, desc
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import PROJECT_ROOT as _PROJECT_ROOT
+from app.core.config import get_short_term_db_path
 from app.models.novel import AgentLog, Base, ChapterDraft, SubPlot
 
 
@@ -29,7 +29,7 @@ class ShortTermMemory:
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            db_path = str(_PROJECT_ROOT / "data" / "short_term.db")
+            db_path = str(get_short_term_db_path())
         self.db_path = db_path
 
         import os
@@ -141,11 +141,40 @@ class ShortTermMemory:
                 .all()
             )
 
+    def patch_chapter(self, novel_id: str, chapter_seq: int, old_text: str,
+                      new_text: str = "", replace_all: bool = True) -> dict:
+        """精准替换章节正文中的文本，返回替换结果（不返回全文，省 token）。
+
+        用于 supervisor 直接修正小问题（错字、角色名用字、单句口径），
+        避免 get_chapter 读全文 + save_chapter 存全文的 token 往返。
+        """
+        draft = self.get_latest_draft(novel_id, chapter_seq)
+        if draft is None:
+            return {"found": 0, "chapter_seq": chapter_seq}
+
+        content = draft.content or ""
+        count = content.count(old_text)
+        if count == 0:
+            return {"found": 0, "chapter_seq": chapter_seq}
+
+        if replace_all:
+            new_content = content.replace(old_text, new_text)
+        else:
+            new_content = content.replace(old_text, new_text, 1)
+            count = 1
+
+        self.save_draft(
+            novel_id=novel_id, chapter_seq=chapter_seq, content=new_content,
+            title=draft.title, feedback=draft.feedback,
+            quality_score=draft.quality_score,
+        )
+        return {"found": count, "chapter_seq": chapter_seq}
+
     # ═══════════════════════════════════════════════════════
     # 智能体日志 CRUD
     # ═══════════════════════════════════════════════════════
 
-    def log_agent_action(self, session_id: str, agent_name: str, action: str,
+    def log_agent_action(self, session_id: str = "", agent_name: str = "", action: str = "",
                          input_summary: str = "", output_summary: str = "",
                          tokens_used: int = 0, success: bool = True,
                          error_msg: str = "", novel_id: str = "") -> str:
@@ -168,6 +197,23 @@ class ShortTermMemory:
             logs = (
                 session.query(AgentLog)
                 .filter(AgentLog.session_id == session_id)
+                .order_by(desc(AgentLog.timestamp))
+                .limit(limit)
+                .all()
+            )
+        return [
+            {"agent": l.agent_name, "action": l.action,
+             "success": l.success, "timestamp": str(l.timestamp),
+             "output_summary": l.output_summary[:200]}
+            for l in reversed(logs)
+        ]
+
+    def get_recent_logs_by_novel(self, novel_id: str, limit: int = 20) -> list[dict]:
+        """按小说获取最近的操作日志（按 novel_id 维度，而非 session_id）"""
+        with self.get_session() as session:
+            logs = (
+                session.query(AgentLog)
+                .filter(AgentLog.novel_id == novel_id)
                 .order_by(desc(AgentLog.timestamp))
                 .limit(limit)
                 .all()

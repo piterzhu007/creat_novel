@@ -58,3 +58,9 @@ htmlcov/
 
 # 构建
 node_modules/
+
+# 编辑器产物
+git.openRepositoryInParentFolders
+
+# 临时调试脚本
+tmp/

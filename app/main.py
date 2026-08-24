@@ -6,6 +6,7 @@
     python -m app.main --help    # 查看帮助
 """
 
+from app.core.async_runtime import run as _async_run
 import sys
 import uuid
 from datetime import datetime
@@ -108,10 +109,19 @@ def get_help_text() -> str:
   退出        — 退出系统
   新会话      — 开始一个全新的对话（清空当前上下文）
   历史会话    — 列出历史会话，可切换回之前的对话
+  自动创作    — 输入创作要求后自动持续推进，直到任务完成（无需手动逐句续跑）
+  续写        — 开干净新会话 + 从记忆库恢复进度继续写（省 token 的断点续传）
 
 📎 文档输入:
   直接输入文档路径（如 output/大纲.txt、./设定.md）即可读取其内容作为输入。
   也可用 @路径 语法显式指定，例如: @./需求.txt 帮我创作这部小说
+
+💡 自动创作示例:
+  自动创作 @D:\Study Test\wangwen_creat\世界观与五行战力系统设定.txt ... 帮我生成600万字小说
+
+💡 省 token 建议:
+  每写一批章节后，用「续写」命令开新会话继续，而不是一直续接旧会话——
+  新会话上下文干净、不重放历史正文，token 从零开始算，进度靠记忆库恢复。
 """
 
 
@@ -134,6 +144,8 @@ class NovelCreationCLI:
         self.settings = get_settings()
         self.session_id = self._load_or_create_session()
         self.graph = None
+        # 硬约束：大纲定稿后是否已交用户审核（审核通过前不进入写正文）
+        self._outline_reviewed = False
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── 会话管理 ───────────────────────────────────────
@@ -362,13 +374,40 @@ class NovelCreationCLI:
                 if user_input in ("历史会话", "history", "sessions"):
                     self._show_sessions(config)
                     continue
+                # 「续写」：开一个干净的新会话，让 supervisor 从记忆库恢复进度继续写，
+                # 避免在旧会话上无限续接导致 token 越滚越大（断点续传的正确省钱姿势）。
+                if user_input in ("续写", "继续写", "resume"):
+                    self.session_id = self._new_session()
+                    config = {"configurable": {"thread_id": self.session_id}}
+                    print("\n📖 已开启续写会话（上下文干净，从记忆库恢复进度）。")
+                    print("   supervisor 会先 list_novels + get_novel_state 恢复进度，再接着写。\n")
+                    try:
+                        _async_run(self._auto_advance(
+                            "继续写之前的小说。请先调用 list_novels 找到已有小说，再用 "
+                            "get_novel_state 恢复进度（当前写到第几章）、大纲和人物名表，"
+                            "然后从下一章接着写。不要重新设计，不要重读源文档。",
+                            config,
+                        ))
+                    except KeyboardInterrupt:
+                        print("\n\n⏸️ 续写已暂停。输入「续写」继续。")
+                    continue
 
                 # 解析输入（可能包含文档路径）
                 resolved_input = self._resolve_input(user_input)
 
+                # 「自动创作」：持续自动推进直到完成（不靠手动逐句续跑）
+                if user_input in ("自动创作", "auto", "自动生成"):
+                    print("\n🚀 已开启自动创作模式，将持续推进直到任务完成。")
+                    print("（可按 Ctrl+C 中断）\n")
+                    try:
+                        _async_run(self._auto_advance(resolved_input, config))
+                    except KeyboardInterrupt:
+                        print("\n\n⏸️ 自动创作已暂停。输入「自动创作」继续，或输入其他指令。")
+                    continue
+
                 # 包装用户输入并流式送入 Deep Agent
                 try:
-                    self._handle_stream(resolved_input, config)
+                    _async_run(self._handle_stream(resolved_input, config))
                 except Exception as e:
                     logger.error(f"工作流执行出错: {e}")
                     print(f"\n⚠️ 处理出错: {e}")
@@ -380,23 +419,40 @@ class NovelCreationCLI:
                 print("\n感谢使用，再见！")
                 break
 
-    def _handle_stream(self, user_content: str, config: dict):
+    async def _handle_stream(self, user_content: str, config: dict, save_output: bool = True):
         """
         流式处理 deep agent 的执行结果。
 
         使用 stream_mode="messages" 逐 token 打印主智能体的回复，
         让用户实时看到进度。同时累积完整内容用于保存产出。
+
+        注意：MCP 工具是 async-only 的（langchain_mcp_adapters 转换的工具只实现
+        _arun），因此必须用 astream 而非同步 stream，否则报
+        「StructuredTool does not support sync invocation」。
+
+        参数:
+            user_content: 用户输入内容
+            config: 工作流配置（含 thread_id）
+            save_output: 是否把最终文本保存为 output 文件（自动推进的中间步骤传 False，
+                         避免堆积大量无意义的 output_*.txt）
         """
         from langchain_core.messages import HumanMessage, AIMessageChunk
+        from app.core.tracing import get_tracer
 
         print()  # 空行分隔
 
         accumulated = []  # 累积 AI 文本
 
+        # 注入运行追踪器回调，捕获 token 消耗 / 工具调用等技术细节
+        tracer = get_tracer()
+        tracer.clear()  # 每次任务重新统计，避免累积上一轮的数据
+        _config = dict(config)
+        _config["callbacks"] = [tracer]
+
         try:
-            for chunk, _metadata in self.graph.stream(
+            async for chunk, _metadata in self.graph.astream(
                 {"messages": [HumanMessage(content=user_content)]},
-                config,
+                _config,
                 stream_mode="messages",
             ):
                 # 只打印 AI 文本 token（跳过工具调用等内部消息）
@@ -408,18 +464,187 @@ class NovelCreationCLI:
         except Exception as e:
             logger.error(f"工作流执行出错: {e}")
             print(f"\n⚠️ 处理出错: {e}")
-            return
+            return ""
 
         # 流式结束后换行
         print()
 
         # 保存完整产出
         full_content = "".join(accumulated).strip()
-        if full_content:
+        if save_output and full_content:
             output_path = self._save_output(full_content)
             print(f"\n💾 产出已保存至: {output_path}")
 
         print()
+
+        # 返回累积的完整文本，供调用方（如自动推进）检查完成标记
+        return full_content
+
+    def _read_current_chapter(self) -> int:
+        """读取当前活跃小说的进度（current_chapter），用于判断是否跨过情节单元边界。
+
+        直接读 data/novels.db（主进程与 MCP 子进程共享同一 SQLite 文件），
+        取所有小说里最大的 current_chapter 作为「活跃小说」的进度。
+        """
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(PROJECT_ROOT / "data" / "novels.db"))
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(current_chapter) FROM novels")
+            row = cur.fetchone()
+            conn.close()
+            return int(row[0]) if row and row[0] else 0
+        except Exception:
+            return 0
+
+    def _outline_ready_for_review(self) -> bool:
+        """判断「大纲已定稿、但正文尚未开始」，此时必须交用户审核（硬约束）。"""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(PROJECT_ROOT / "data" / "novels.db"))
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(current_chapter) FROM novels")
+            chapter = cur.fetchone()[0] or 0
+            if chapter > 0:
+                conn.close()
+                return False  # 正文已开始，大纲阶段已过
+            cur.execute("SELECT COUNT(*) FROM outlines WHERE locked = 1")
+            locked = cur.fetchone()[0] or 0
+            conn.close()
+            return locked > 0  # 有 locked 的大纲 = 已定稿、待审核
+        except Exception:
+            return False
+
+    def _read_outline_for_review(self) -> str:
+        """读取落库的全书大纲（locked 条目）全文，供用户审核。"""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(PROJECT_ROOT / "data" / "novels.db"))
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT title, summary, key_events FROM outlines "
+                "WHERE locked = 1 ORDER BY chapter_seq"
+            )
+            rows = cur.fetchall()
+            conn.close()
+            parts = []
+            for title, summary, key_events in rows:
+                parts.append(f"## {title}\n{summary or ''}")
+                if key_events:
+                    parts.append(f"关键事件：{key_events}")
+            return "\n\n".join(parts) if parts else "（未找到已定稿的大纲）"
+        except Exception as e:
+            return f"（读取大纲失败：{e}）"
+
+    # 自动推进的终止信号（supervisor 输出中出现这些词时判定任务已全部完成）
+    _DONE_MARKERS = ("创作总结", "全部完成", "已全部", "全部导出", "全部章节", "全部写完")
+
+    # 情节单元大小（章）：supervisor 每推进约一个单元（3~5 章）就重置一次上下文，
+    # 让消息历史保持有界、避免 O(N²) token 爆炸。进度已落库，重置是安全的（可从 DB 恢复）。
+    UNIT_CHAPTERS = 5
+
+    async def _auto_advance(self, initial_input: str, config: dict, max_steps: int = 50):
+        """
+        自动推进循环：持续喂给 supervisor「继续」指令，直到任务全部完成。
+
+        背景：supervisor 是 ReAct 智能体，单次 stream 只推进「一步」（例如创建项目、
+        或设计大纲、或写一章）。若不自动续跑，600万字/2000章的任务每步都要手动输入，
+        不可能完成。本方法在每轮结束后自动续一句「继续推进」，直到 supervisor 输出
+        明确的完成总结，或达到 max_steps 上限。
+
+        参数:
+            initial_input: 用户最初的创作指令（仅第一步喂入）
+            config: 工作流配置
+            max_steps: 最大自动推进轮数（防止真死循环时无限烧 token）
+        """
+        # 第一步：喂入用户原始指令（仅首步保存 output，后续避免堆积）
+        last_text = await self._handle_stream(initial_input, config, save_output=True)
+        # 记录本次上下文的「锚点」进度：之后每推进约一个情节单元就重置一次 supervisor 上下文
+        last_reset_chapter = self._read_current_chapter()
+
+        # 后续步骤：自动续跑
+        for step in range(1, max_steps + 1):
+            if any(marker in (last_text or "") for marker in self._DONE_MARKERS):
+                print("\n✅ 检测到创作完成标记，自动推进结束。")
+                break
+
+            # ── 硬约束：大纲定稿后、正文开始前，把落库的全书大纲交用户审核，通过前不进入写作 ──
+            if not self._outline_reviewed and self._outline_ready_for_review():
+                outline = self._read_outline_for_review()
+                print("\n" + "=" * 60)
+                print("  📋 【硬约束】全书大纲已定稿，请审核以下落库大纲")
+                print("=" * 60)
+                print(outline)
+                print("=" * 60)
+                approval = clean_text(
+                    input("大纲审核 > 输入「通过」开始写正文，或输入修改意见：")
+                ).strip()
+                if approval == "通过":
+                    self._outline_reviewed = True
+                    print("\n✅ 大纲审核通过，开始写正文。\n")
+                    try:
+                        last_text = await self._handle_stream(
+                            "大纲审核已通过，开始写正文，按大纲里的情节单元批量推进。",
+                            config, save_output=False,
+                        )
+                    except Exception as e:
+                        logger.error(f"开始写正文出错: {e}")
+                        print(f"\n⚠️ 出错: {e}")
+                        break
+                else:
+                    print(f"\n📝 已记录修改意见，交 supervisor 修订大纲并重新定稿。\n")
+                    try:
+                        last_text = await self._handle_stream(
+                            f"用户对大纲的审核意见（硬约束，必须据此修订）：{approval}。"
+                            "请修改大纲并重新定稿，再交回审核。",
+                            config, save_output=False,
+                        )
+                    except Exception as e:
+                        logger.error(f"修订大纲出错: {e}")
+                        print(f"\n⚠️ 出错: {e}")
+                        break
+                continue
+
+            # 按单元重置上下文：进度跨过一个情节单元（UNIT_CHAPTERS 章）后，
+            # 重启 supervisor 消息历史（换新 thread_id），用 get_novel_progress 从记忆库恢复，
+            # 让上下文保持有界、避免 O(N²) token 爆炸。进度已落库，重置安全。
+            current_chapter = self._read_current_chapter()
+            if current_chapter > 0 and current_chapter - last_reset_chapter >= self.UNIT_CHAPTERS:
+                self.session_id = self._new_session()
+                config["configurable"]["thread_id"] = self.session_id
+                last_reset_chapter = current_chapter
+                print(f"\n🔁 已完成约一个情节单元（第 {current_chapter} 章），重置 supervisor 上下文（进度已落库，从记忆库恢复）。\n")
+                try:
+                    last_text = await self._handle_stream(
+                        "继续写之前的小说。请先调用 get_novel_progress 恢复进度"
+                        "（当前写到第几章）、大纲和角色名表，再从下一单元接着写。"
+                        "不要重新设计，不要重读源文档。",
+                        config,
+                        save_output=False,
+                    )
+                except Exception as e:
+                    logger.error(f"重置后恢复出错: {e}")
+                    print(f"\n⚠️ 恢复中断: {e}")
+                    break
+                continue
+
+            print(f"\n{'=' * 60}")
+            print(f"  🔄 自动推进第 {step} 步（最多 {max_steps} 步）")
+            print(f"{'=' * 60}\n")
+            try:
+                last_text = await self._handle_stream(
+                    "继续推进创作任务。若上一阶段已完成，就进入下一阶段；"
+                    "若整部小说已全部完成并导出，请输出「创作总结」。",
+                    config,
+                    save_output=False,
+                )
+            except Exception as e:
+                logger.error(f"自动推进出错: {e}")
+                print(f"\n⚠️ 自动推进中断: {e}")
+                break
+        else:
+            print(f"\n⚠️ 已达最大自动推进步数（{max_steps}），暂停。"
+                  f"可再次输入「自动创作」继续，或手动输入「继续」推进。")
 
 
 def main():
@@ -438,6 +663,10 @@ def main():
     except Exception as e:
         logger.exception(f"未预期的错误: {e}")
         sys.exit(1)
+    finally:
+        # 优雅关闭持久 event loop（MCP session / aiosqlite 连接绑定其上）
+        from app.core.async_runtime import close as _close_loop
+        _close_loop()
 
 
 if __name__ == "__main__":

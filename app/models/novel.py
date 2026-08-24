@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -90,6 +90,7 @@ class Character(Base):
     abilities: Mapped[str] = mapped_column(Text, default="", comment="能力/特长")
     relationships: Mapped[str] = mapped_column(Text, default="", comment="人物关系 (JSON)")
     arc_summary: Mapped[str] = mapped_column(Text, default="", comment="人物弧光概述")
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, comment="定稿锁：True=supervisor 已定稿，子智能体不可覆盖")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -105,6 +106,7 @@ class WorldSetting(Base):
     name: Mapped[str] = mapped_column(String(256), comment="设定名称")
     description: Mapped[str] = mapped_column(Text, default="", comment="设定详细描述")
     details: Mapped[str] = mapped_column(Text, default="", comment="补充详情 (JSON)")
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, comment="定稿锁：True=supervisor 已定稿，子智能体不可覆盖")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -122,6 +124,7 @@ class Outline(Base):
     key_events: Mapped[str] = mapped_column(Text, default="", comment="关键事件列表 (JSON)")
     foreshadowing: Mapped[str] = mapped_column(Text, default="", comment="伏笔设计")
     status: Mapped[str] = mapped_column(String(32), default=ChapterStatus.OUTLINED.value)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, comment="定稿锁：True=supervisor 已定稿，子智能体不可覆盖")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -137,6 +140,7 @@ class MainPlot(Base):
     start_chapter: Mapped[int] = mapped_column(Integer, default=0, comment="起始章节")
     end_chapter: Mapped[int] = mapped_column(Integer, default=0, comment="结束章节")
     status: Mapped[str] = mapped_column(String(32), default="active", comment="状态")
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, comment="定稿锁：True=supervisor 已定稿，子智能体不可覆盖")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -206,4 +210,19 @@ class WritingIssue(Base):
     found_by: Mapped[str] = mapped_column(String(32), default="", comment="发现者: editor/reader")
     severity: Mapped[str] = mapped_column(String(16), default="medium", comment="严重程度: low/medium/high")
     status: Mapped[str] = mapped_column(String(16), default="open", comment="状态: open/resolved")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SourceDoc(Base):
+    """源文档表：每个小说项目各自的源文档内容（多项目隔离）。
+
+    源文档（人物/世界观/提纲/问题）不再从固定路径全局读取，而是按 novel_id
+    存成独立记录——这样开启新项目时，各自用各自的源文档，互不污染。
+    """
+    __tablename__ = "source_docs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    novel_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属小说ID")
+    doc_name: Mapped[str] = mapped_column(String(256), comment="文档名（如 人物角色与背景.txt）")
+    content: Mapped[str] = mapped_column(Text, default="", comment="文档完整内容")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

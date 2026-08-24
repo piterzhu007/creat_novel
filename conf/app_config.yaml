@@ -53,24 +53,8 @@ agents:
   reader:
     model: deepseek_flash      # 读者：用 flash（一致性检查较轻）
 
-memory:
-  long_term:
-    db_type: "sqlite"
-    db_path: "data/novels.db"
-  short_term:
-    db_type: "sqlite"
-    db_path: ":memory:"
-  vector:
-    db_type: "chromadb"
-    persist_dir: "data/vector_db/"
-
 logging:
   level: "INFO"
   format: "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}"
   rotation: "10 MB"
   retention: "7 days"
-
-workflow:
-  max_retries: 3
-  max_chapter_length: 10000
-  checkpoint_thread_prefix: "novel_creation"

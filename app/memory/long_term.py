@@ -22,6 +22,7 @@ from app.models.novel import (
     MainPlot,
     Novel,
     Outline,
+    SourceDoc,
     WorldSetting,
     WritingIssue,
 )
@@ -64,7 +65,15 @@ class LongTermMemory:
 
     def create_novel(self, title: str, genre: str = "", synopsis: str = "",
                      target_chapters: int = 0) -> str:
-        """创建新小说，返回 novel_id"""
+        """创建新小说，返回 novel_id（同名小说已存在则复用，避免重复从零设计）"""
+        # 复用：同名小说已存在则直接返回已有 novel_id，
+        # 让后续 architect 用 get_novel_state 接续上一轮已提炼的人物/世界观/大纲。
+        with self.get_session() as session:
+            existing = session.query(Novel).filter(Novel.title == title).first()
+            if existing:
+                logger.info(f"复用已有小说: {title} (id={existing.novel_id})")
+                return existing.novel_id
+
         novel_id = f"novel_{uuid.uuid4().hex[:12]}"
         with self.get_session() as session:
             novel = Novel(
@@ -170,18 +179,33 @@ class LongTermMemory:
     # 人物 CRUD
     # ═══════════════════════════════════════════════════════
 
-    def save_character(self, novel_id: str, profile: CharacterProfile) -> str:
-        """保存人物档案"""
-        char_id = profile.char_id or f"char_{uuid.uuid4().hex[:12]}"
+    def save_character(self, novel_id: str, profile: CharacterProfile, locked: bool = False) -> str:
+        """保存人物档案（按 novel_id + name 去重，同名则更新而非新建，保证角色档案唯一）。
+
+        角色档案是全文唯一标准：同一小说内角色名唯一，重复保存同名角色会更新原条目，
+        保留原 char_id，避免「删了重存导致 char_id 变化、向量/引用失效」的混乱。
+
+        定稿锁：已 locked 的条目，只能被 locked=True（supervisor 定稿更新）覆盖；
+        locked=False（子智能体草稿）的写入会抛 ValueError，防止子智能体覆盖定稿内容。
+        """
         with self.get_session() as session:
-            existing = session.query(Character).filter(Character.char_id == char_id).first()
+            existing = (
+                session.query(Character)
+                .filter(Character.novel_id == novel_id, Character.name == profile.name)
+                .first()
+            )
+            if existing and existing.locked and not locked:
+                raise ValueError(f"角色「{profile.name}」已由 supervisor 定稿锁定，无权覆盖")
             if existing:
-                # 更新
+                # 同名角色已存在：更新（保留原 char_id）
                 for key, value in profile.model_dump(exclude={"char_id"}).items():
                     setattr(existing, key, value)
+                existing.locked = locked
                 existing.updated_at = datetime.utcnow()
+                char_id = existing.char_id
             else:
-                char = Character(char_id=char_id, novel_id=novel_id, **profile.model_dump(exclude={"char_id"}))
+                char_id = profile.char_id or f"char_{uuid.uuid4().hex[:12]}"
+                char = Character(char_id=char_id, novel_id=novel_id, locked=locked, **profile.model_dump(exclude={"char_id"}))
                 session.add(char)
             session.commit()
         return char_id
@@ -219,30 +243,44 @@ class LongTermMemory:
     # 世界观设定 CRUD
     # ═══════════════════════════════════════════════════════
 
-    def save_world_setting(self, novel_id: str, profile: WorldSettingProfile) -> str:
-        """保存世界观设定"""
-        sid = profile.setting_id or f"setting_{uuid.uuid4().hex[:12]}"
+    def save_world_setting(self, novel_id: str, profile: WorldSettingProfile, locked: bool = False) -> str:
+        """保存世界观设定（按 novel_id + name 去重，避免同名设定重复条目）。
+
+        定稿锁：已 locked 的条目，只能被 locked=True（supervisor 定稿更新）覆盖。
+        """
         with self.get_session() as session:
-            existing = session.query(WorldSetting).filter(WorldSetting.setting_id == sid).first()
+            existing = (
+                session.query(WorldSetting)
+                .filter(WorldSetting.novel_id == novel_id, WorldSetting.name == profile.name)
+                .first()
+            )
+            if existing and existing.locked and not locked:
+                raise ValueError(f"设定「{profile.name}」已由 supervisor 定稿锁定，无权覆盖")
             if existing:
                 existing.category = profile.category
-                existing.name = profile.name
                 existing.description = profile.description
                 existing.details = profile.details
+                existing.locked = locked
+                sid = existing.setting_id
             else:
+                sid = profile.setting_id or f"setting_{uuid.uuid4().hex[:12]}"
                 setting = WorldSetting(
                     setting_id=sid, novel_id=novel_id, category=profile.category,
                     name=profile.name, description=profile.description,
-                    details=profile.details,
+                    details=profile.details, locked=locked,
                 )
                 session.add(setting)
             session.commit()
         return sid
 
     def get_world_settings(self, novel_id: str) -> list[WorldSettingProfile]:
-        """获取小说的世界观设定"""
+        """获取小说的世界观设定（排除 character_registry 等内部记录，不对外展示）"""
         with self.get_session() as session:
-            settings = session.query(WorldSetting).filter(WorldSetting.novel_id == novel_id).all()
+            settings = (
+                session.query(WorldSetting)
+                .filter(WorldSetting.novel_id == novel_id, WorldSetting.category != "character_registry")
+                .all()
+            )
         return [
             WorldSettingProfile(
                 setting_id=s.setting_id, category=s.category or "",
@@ -255,23 +293,29 @@ class LongTermMemory:
     # 大纲 CRUD
     # ═══════════════════════════════════════════════════════
 
-    def save_outline(self, novel_id: str, entry: OutlineEntry) -> str:
-        """保存大纲条目"""
+    def save_outline(self, novel_id: str, entry: OutlineEntry, locked: bool = False) -> str:
+        """保存大纲条目。
+
+        定稿锁：已 locked 的条目，只能被 locked=True（supervisor 定稿更新）覆盖。
+        """
         oid = entry.outline_id or f"outline_{uuid.uuid4().hex[:12]}"
         with self.get_session() as session:
             existing = session.query(Outline).filter(Outline.outline_id == oid).first()
+            if existing and existing.locked and not locked:
+                raise ValueError(f"大纲「{entry.title}」已由 supervisor 定稿锁定，无权覆盖")
             if existing:
                 existing.title = entry.title
                 existing.summary = entry.summary
                 existing.key_events = entry.key_events
                 existing.foreshadowing = entry.foreshadowing
                 existing.status = entry.status
+                existing.locked = locked
             else:
                 outline = Outline(
                     outline_id=oid, novel_id=novel_id, chapter_seq=entry.chapter_seq,
                     volume=entry.volume, title=entry.title, summary=entry.summary,
                     key_events=entry.key_events, foreshadowing=entry.foreshadowing,
-                    status=entry.status,
+                    status=entry.status, locked=locked,
                 )
                 session.add(outline)
             session.commit()
@@ -282,7 +326,17 @@ class LongTermMemory:
         return [self.save_outline(novel_id, entry) for entry in entries]
 
     def get_outlines(self, novel_id: str) -> list[OutlineEntry]:
-        """获取小说大纲（按章节序排序）"""
+        """
+        获取小说大纲（按章节序排序）。
+
+        兼容两种情况：
+        1. outlines 表（分章大纲，OutlineEntry 结构，chapter_seq/volume/title/summary）
+        2. main_plots 表（分卷大纲，architect 用 save_to_long_term(category="plot") 保存）
+
+        architect 实际是通过 save_to_long_term(category="plot") 保存大纲到 main_plots 表，
+        而本方法原本只读 outlines 表，导致大纲「存了却读不到」（get_novel_outline 永远返回暂无大纲数据）。
+        此处做 fallback：outlines 表为空时，从 main_plots 表构造等价条目返回。
+        """
         with self.get_session() as session:
             outlines = (
                 session.query(Outline)
@@ -290,14 +344,34 @@ class LongTermMemory:
                 .order_by(Outline.chapter_seq)
                 .all()
             )
+
+        if outlines:
+            return [
+                OutlineEntry(
+                    outline_id=o.outline_id, chapter_seq=o.chapter_seq,
+                    volume=o.volume, title=o.title, summary=o.summary or "",
+                    key_events=o.key_events or "", foreshadowing=o.foreshadowing or "",
+                    status=o.status,
+                )
+                for o in outlines
+            ]
+
+        # fallback：从 main_plots 表读取（architect 存的分卷大纲）
+        plots = self.get_main_plots(novel_id)
+        if not plots:
+            return []
         return [
             OutlineEntry(
-                outline_id=o.outline_id, chapter_seq=o.chapter_seq,
-                volume=o.volume, title=o.title, summary=o.summary or "",
-                key_events=o.key_events or "", foreshadowing=o.foreshadowing or "",
-                status=o.status,
+                outline_id=p.get("plot_id", ""),
+                chapter_seq=i + 1,
+                volume=1,
+                title=p.get("arc_name", ""),
+                summary=p.get("description", ""),
+                key_events="",
+                foreshadowing="",
+                status=p.get("status", "outlined"),
             )
-            for o in outlines
+            for i, p in enumerate(plots)
         ]
 
     # ═══════════════════════════════════════════════════════
@@ -305,16 +379,33 @@ class LongTermMemory:
     # ═══════════════════════════════════════════════════════
 
     def save_main_plot(self, novel_id: str, arc_name: str, description: str,
-                       start_chapter: int = 0, end_chapter: int = 0) -> str:
-        """保存主线情节"""
-        plot_id = f"plot_{uuid.uuid4().hex[:12]}"
+                       start_chapter: int = 0, end_chapter: int = 0, locked: bool = False) -> str:
+        """保存主线情节（按 novel_id + arc_name 去重，存在则更新，避免重复条目）。
+
+        定稿锁：已 locked 的条目，只能被 locked=True（supervisor 定稿更新）覆盖。
+        """
         with self.get_session() as session:
-            plot = MainPlot(
-                plot_id=plot_id, novel_id=novel_id, arc_name=arc_name,
-                description=description, start_chapter=start_chapter,
-                end_chapter=end_chapter,
+            existing = (
+                session.query(MainPlot)
+                .filter(MainPlot.novel_id == novel_id, MainPlot.arc_name == arc_name)
+                .first()
             )
-            session.add(plot)
+            if existing and existing.locked and not locked:
+                raise ValueError(f"情节「{arc_name}」已由 supervisor 定稿锁定，无权覆盖")
+            if existing:
+                existing.description = description
+                existing.start_chapter = start_chapter
+                existing.end_chapter = end_chapter
+                existing.locked = locked
+                plot_id = existing.plot_id
+            else:
+                plot_id = f"plot_{uuid.uuid4().hex[:12]}"
+                plot = MainPlot(
+                    plot_id=plot_id, novel_id=novel_id, arc_name=arc_name,
+                    description=description, start_chapter=start_chapter,
+                    end_chapter=end_chapter, locked=locked,
+                )
+                session.add(plot)
             session.commit()
         return plot_id
 
@@ -449,6 +540,155 @@ class LongTermMemory:
                 session.commit()
                 return True
         return False
+
+    # ═══════════════════════════════════════════════════════
+    # 删除 CRUD（消除新旧条目并存的冲突）
+    # ═══════════════════════════════════════════════════════
+
+    def delete_character(self, novel_id: str, name: str) -> int:
+        """按名称删除人物（返回删除数量）"""
+        with self.get_session() as session:
+            n = session.query(Character).filter(
+                Character.novel_id == novel_id, Character.name == name
+            ).delete()
+            session.commit()
+        if n:
+            logger.info(f"已删除人物: {name}（{n} 条）")
+        return n
+
+    def delete_world_setting(self, novel_id: str, name: str) -> int:
+        """按名称删除世界观设定"""
+        with self.get_session() as session:
+            n = session.query(WorldSetting).filter(
+                WorldSetting.novel_id == novel_id, WorldSetting.name == name
+            ).delete()
+            session.commit()
+        if n:
+            logger.info(f"已删除设定: {name}（{n} 条）")
+        return n
+
+    def delete_main_plot(self, novel_id: str, arc_name: str) -> int:
+        """按名称删除主线情节"""
+        with self.get_session() as session:
+            n = session.query(MainPlot).filter(
+                MainPlot.novel_id == novel_id, MainPlot.arc_name == arc_name
+            ).delete()
+            session.commit()
+        if n:
+            logger.info(f"已删除情节: {arc_name}（{n} 条）")
+        return n
+
+    def delete_outline(self, novel_id: str, title: str) -> int:
+        """按标题删除大纲条目"""
+        with self.get_session() as session:
+            n = session.query(Outline).filter(
+                Outline.novel_id == novel_id, Outline.title == title
+            ).delete()
+            session.commit()
+        if n:
+            logger.info(f"已删除大纲: {title}（{n} 条）")
+        return n
+
+    def lock_entry(self, novel_id: str, category: str, name: str) -> int:
+        """定稿加锁：把已有条目 locked=True（不改内容、不重发全文）。
+
+        supervisor 审核通过草稿后调用，只需传条目名即可定稿，避免把草稿全文
+        再次塞进 supervisor 上下文（这是 token 爆炸的主要来源之一）。
+
+        参数:
+            novel_id: 小说ID
+            category: 分类 (character/setting/plot/outline)
+            name: 条目名称（人物名/设定名/情节名/大纲标题）
+
+        返回: 加锁的条目数量（0 表示未找到）
+        """
+        mapping = {
+            "character": (Character, Character.name),
+            "setting": (WorldSetting, WorldSetting.name),
+            "plot": (MainPlot, MainPlot.arc_name),
+            "outline": (Outline, Outline.title),
+        }
+        if category not in mapping:
+            return 0
+        model, col = mapping[category]
+        with self.get_session() as session:
+            rows = session.query(model).filter(
+                model.novel_id == novel_id, col == name
+            ).all()
+            n = 0
+            for r in rows:
+                r.locked = True
+                n += 1
+            session.commit()
+        if n:
+            logger.info(f"已定稿加锁: {category}「{name}」（{n} 条）")
+        return n
+
+    def save_character_registry(self, novel_id: str, names: list[str]) -> None:
+        """把权威角色名表持久化为一条世界设定记录（单一事实源）。
+
+        存为 category=character_registry, name=authoritative_names，
+        供 get_story_bible 读取权威名表——避免依赖可能被污染/遗漏的角色档案表
+        （档案表只含「已落库」的角色，权威名表来自源文档，二者可能不一致）。
+        """
+        with self.get_session() as session:
+            existing = (
+                session.query(WorldSetting)
+                .filter(WorldSetting.novel_id == novel_id, WorldSetting.name == "authoritative_names")
+                .first()
+            )
+            desc = json.dumps(sorted(names), ensure_ascii=False)
+            if existing:
+                existing.category = "character_registry"
+                existing.description = desc
+            else:
+                session.add(WorldSetting(
+                    setting_id=f"setting_{uuid.uuid4().hex[:12]}",
+                    novel_id=novel_id, category="character_registry",
+                    name="authoritative_names", description=desc,
+                ))
+            session.commit()
+
+    def get_character_registry(self, novel_id: str) -> list[str]:
+        """读取权威角色名表（未持久化则返回空列表）。"""
+        with self.get_session() as session:
+            row = (
+                session.query(WorldSetting)
+                .filter(WorldSetting.novel_id == novel_id, WorldSetting.name == "authoritative_names")
+                .first()
+            )
+        if not row or not row.description:
+            return []
+        try:
+            names = json.loads(row.description)
+            return [n for n in names if n]
+        except Exception:
+            return []
+
+    def save_source_doc(self, novel_id: str, doc_name: str, content: str) -> None:
+        """保存/更新某小说的一条源文档（多项目隔离，按 novel_id 存）。"""
+        with self.get_session() as session:
+            existing = (
+                session.query(SourceDoc)
+                .filter(SourceDoc.novel_id == novel_id, SourceDoc.doc_name == doc_name)
+                .first()
+            )
+            if existing:
+                existing.content = content
+            else:
+                session.add(SourceDoc(novel_id=novel_id, doc_name=doc_name, content=content))
+            session.commit()
+
+    def get_source_docs(self, novel_id: str) -> list[tuple[str, str]]:
+        """读取某小说的所有源文档，返回 [(doc_name, content)]（按 doc_name 排序）。"""
+        with self.get_session() as session:
+            docs = (
+                session.query(SourceDoc)
+                .filter(SourceDoc.novel_id == novel_id)
+                .order_by(SourceDoc.doc_name)
+                .all()
+            )
+        return [(d.doc_name, d.content) for d in docs]
 
     # ═══════════════════════════════════════════════════════
     # 故事圣经（Story Bible）—— 精简权威设定卡

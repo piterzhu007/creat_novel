@@ -9,24 +9,24 @@ from unittest.mock import MagicMock, patch
 class TestNovelMemoryTools:
     """记忆工具测试"""
 
-    def test_tool_count(self):
+    def test_tool_count(self, tmp_path):
         """测试工具数量正确"""
         from app.tools import NovelMemoryTools
         from app.memory import LongTermMemory, ShortTermMemory, VectorStore
-        ltm = LongTermMemory()
-        stm = ShortTermMemory()
-        vs = VectorStore()
+        ltm = LongTermMemory(str(tmp_path / "lt.db"))
+        stm = ShortTermMemory(str(tmp_path / "st.db"))
+        vs = VectorStore(str(tmp_path / "vec"))
         factory = NovelMemoryTools(ltm, stm, vs)
         tools = factory.get_tools()
-        assert len(tools) == 17
+        assert len(tools) == 25
 
-    def test_tool_names(self):
+    def test_tool_names(self, tmp_path):
         """测试所有工具名称正确"""
         from app.tools import NovelMemoryTools
         from app.memory import LongTermMemory, ShortTermMemory, VectorStore
-        ltm = LongTermMemory()
-        stm = ShortTermMemory()
-        vs = VectorStore()
+        ltm = LongTermMemory(str(tmp_path / "lt.db"))
+        stm = ShortTermMemory(str(tmp_path / "st.db"))
+        vs = VectorStore(str(tmp_path / "vec"))
         factory = NovelMemoryTools(ltm, stm, vs)
         tool_names = [t.name for t in factory.get_tools()]
         expected = [
@@ -47,25 +47,36 @@ class TestNovelMemoryTools:
             "get_novel_state",
             "update_novel_progress",
             "create_novel",
+            "save_run_log",
+            "get_chapter",
+            "read_source_docs",
+            "delete_long_term_entry",
+            "patch_chapter",
+            "get_writing_context",
+            "lock_entry",
+            "get_novel_progress",
         ]
         for name in expected:
             assert name in tool_names, f"工具 {name} 未在列表中找到"
 
 
 class TestWorkflowIntegration:
-    """工作流集成测试（deepagents 架构）"""
+    """工作流集成测试（deepagents 架构 + MCP 工具）"""
 
-    @patch("app.agent.LongTermMemory")
-    @patch("app.agent.ShortTermMemory")
-    @patch("app.agent.VectorStore")
-    def test_build_workflow(self, mock_vs, mock_stm, mock_ltm):
-        """测试构建 deep agent 工作流"""
+    @patch("app.agent._load_mcp_tools")
+    def test_build_workflow(self, mock_load_tools):
+        """测试构建 deep agent 工作流（工具通过 mock 的 MCP 加载）"""
         from app.workflow import create_novel_workflow
         from app.core.model_client import reset_model_registry
 
-        mock_ltm.return_value = MagicMock()
-        mock_stm.return_value = MagicMock()
-        mock_vs.return_value = MagicMock()
+        # mock MCP 加载返回一个哑工具，避免测试时启动真实子进程
+        from langchain_core.tools import tool as langchain_tool
+        @langchain_tool
+        def dummy_tool(x: str) -> str:
+            """哑工具"""
+            return x
+        dummy_tool.name = "dummy_tool"
+        mock_load_tools.return_value = [dummy_tool]
         reset_model_registry()
 
         graph = create_novel_workflow(checkpoint_db_path=None)
@@ -78,34 +89,38 @@ class TestWorkflowIntegration:
 class TestDeepAgent:
     """工作流创建测试"""
 
-    @patch("app.agent.LongTermMemory")
-    @patch("app.agent.ShortTermMemory")
-    @patch("app.agent.VectorStore")
-    def test_create_workflow_compiles(self, mock_vs, mock_stm, mock_ltm):
+    @patch("app.agent._load_mcp_tools")
+    def test_create_workflow_compiles(self, mock_load_tools):
         """测试创建 deep agent 工作流并编译成功"""
         from app.workflow import create_novel_workflow
         from app.core.model_client import reset_model_registry
         from langgraph.graph.state import CompiledStateGraph
 
-        mock_ltm.return_value = MagicMock()
-        mock_stm.return_value = MagicMock()
-        mock_vs.return_value = MagicMock()
+        from langchain_core.tools import tool as langchain_tool
+        @langchain_tool
+        def dummy_tool(x: str) -> str:
+            """哑工具"""
+            return x
+        dummy_tool.name = "dummy_tool"
+        mock_load_tools.return_value = [dummy_tool]
         reset_model_registry()
 
         graph = create_novel_workflow(checkpoint_db_path=None)
         assert isinstance(graph, CompiledStateGraph)
 
-    @patch("app.agent.LongTermMemory")
-    @patch("app.agent.ShortTermMemory")
-    @patch("app.agent.VectorStore")
-    def test_graph_has_nodes(self, mock_vs, mock_stm, mock_ltm):
+    @patch("app.agent._load_mcp_tools")
+    def test_graph_has_nodes(self, mock_load_tools):
         """测试 Graph 包含 ReAct 循环节点"""
         from app.workflow import create_novel_workflow
         from app.core.model_client import reset_model_registry
 
-        mock_ltm.return_value = MagicMock()
-        mock_stm.return_value = MagicMock()
-        mock_vs.return_value = MagicMock()
+        from langchain_core.tools import tool as langchain_tool
+        @langchain_tool
+        def dummy_tool(x: str) -> str:
+            """哑工具"""
+            return x
+        dummy_tool.name = "dummy_tool"
+        mock_load_tools.return_value = [dummy_tool]
         reset_model_registry()
 
         graph = create_novel_workflow(checkpoint_db_path=None)
@@ -177,20 +192,143 @@ class TestConfig:
 
 
 class TestMCPIntegration:
-    """MCP 集成测试"""
+    """MCP 服务器测试"""
 
-    def test_tool_registry(self):
-        """测试工具注册表"""
-        from app.mcp.tools import get_tool_registry
-        registry = get_tool_registry()
-        tools = registry.all_tools
-        assert len(tools) == 17
+    def test_mcp_server_has_all_tools(self):
+        """测试 MCP server 暴露全部工具"""
+        import asyncio
+        from app.mcp.server import mcp
+        tools = asyncio.run(mcp.list_tools())
+        tool_names = [t.name for t in tools]
+        required = ["create_novel", "get_chapter", "read_source_docs", "delete_long_term_entry"]
+        for name in required:
+            assert name in tool_names, f"工具 {name} 未在 MCP server 中注册"
 
-    def test_tool_groups(self):
-        """测试工具分组"""
-        from app.mcp.tools import get_tool_registry
-        registry = get_tool_registry()
-        groups = registry.get_tools_by_group()
-        assert "long_term_memory" in groups
-        assert "short_term_memory" in groups
-        assert "vector_search" in groups
+
+class TestToolPermission:
+    """工具权限测试：细粒度写库边界 + supervisor 定稿独占（硬约束）"""
+
+    def test_write_tools_set(self):
+        """测试写工具集合正确（10 个写工具）"""
+        from app.agent import _WRITE_TOOLS
+        assert _WRITE_TOOLS == frozenset({
+            "create_novel", "update_novel_progress", "save_to_long_term",
+            "save_chapter", "patch_chapter", "update_short_term",
+            "save_writing_issue", "export_chapters", "delete_long_term_entry",
+            "save_run_log", "lock_entry",
+        })
+
+    def test_sub_agents_fine_grained_write(self, tmp_path):
+        """测试子智能体只含各自的专属写工具，不含 supervisor 独占写工具"""
+        from app.agent import _build_sub_agents
+        from app.memory import LongTermMemory, ShortTermMemory, VectorStore
+        from app.tools import NovelMemoryTools
+
+        ltm = LongTermMemory(str(tmp_path / "lt.db"))
+        stm = ShortTermMemory(str(tmp_path / "st.db"))
+        vs = VectorStore(str(tmp_path / "vec"))
+        factory = NovelMemoryTools(ltm, stm, vs)
+        all_tools = factory.get_tools()
+
+        registry = MagicMock()
+        registry.get_model = MagicMock(return_value=MagicMock())
+
+        sub_agents = _build_sub_agents(all_tools, registry)
+        assert len(sub_agents) == 4
+
+        # supervisor 独占的写工具（定稿锁、删除、patch、进度、导出、建项目、日志）
+        supervisor_only = {
+            "create_novel", "update_novel_progress", "patch_chapter",
+            "export_chapters", "delete_long_term_entry", "save_run_log",
+            "lock_entry",
+        }
+        # 每个子智能体的专属写工具（方案 A 细粒度边界）
+        expected_write = {
+            "architect": {"save_to_long_term"},
+            "writer": {"save_chapter", "update_short_term"},
+            "editor": {"save_writing_issue"},
+            "reader": {"save_writing_issue"},
+        }
+
+        for sa in sub_agents:
+            tool_names = set(t.name for t in sa["tools"])
+            assert not (supervisor_only & tool_names), f"{sa['name']} 不应含 supervisor 独占写工具"
+            own = expected_write[sa["name"]]
+            assert own <= tool_names, f"{sa['name']} 应含专属写工具 {own}"
+            for other_name, other_write in expected_write.items():
+                if other_name != sa["name"]:
+                    for w in (other_write - own):
+                        assert w not in tool_names, f"{sa['name']} 不应含 {other_name} 的写工具 {w}"
+
+
+class TestNameConfusionGuard:
+    """角色名混乱防护：名表补全 + 写时硬校验 + 名表入 DB"""
+
+    @staticmethod
+    def _make_factory(tmp_path):
+        from app.tools import NovelMemoryTools
+        from app.memory import LongTermMemory, ShortTermMemory, VectorStore
+        ltm = LongTermMemory(str(tmp_path / "lt.db"))
+        stm = ShortTermMemory(str(tmp_path / "st.db"))
+        vs = VectorStore(str(tmp_path / "vec"))
+        return NovelMemoryTools(ltm, stm, vs), ltm, stm
+
+    def test_extract_includes_group_members(self):
+        """名表应补全 F4/315 群体段落里的成员名（此前漏掉，被当名表外）"""
+        from app.tools.factory import NovelMemoryTools
+        text = open("人物角色与背景.txt", encoding="utf-8", errors="replace").read()
+        names = NovelMemoryTools._extract_character_names(text)
+        for n in ["赵志龙", "钟奕", "小雅", "魏大鹏", "宋伟", "刘松", "曾国欢", "曾国庆"]:
+            assert n in names, f"名表应含群体成员 {n}"
+
+    def test_save_chapter_corrects_confusable(self, tmp_path):
+        """写时硬校验：正文里的同音/简繁错字自动回退为正确写法（字符级易混淆）"""
+        factory, _, stm = self._make_factory(tmp_path)
+        nid = factory._create_novel("测试", "都市", "", 100).split("novel_id=")[1].rstrip(")。")
+        factory._save_chapter(nid, 1, "林峰看到林風和林楓。", "t")
+        draft = stm.get_latest_draft(nid, 1)
+        for bad in ("林峰", "林風", "林楓"):
+            assert bad not in draft.content, f"正文不应残留 {bad}"
+        assert "林枫" in draft.content  # 枫
+
+    def test_registry_persisted_and_used_by_story_bible(self, tmp_path):
+        """名表入 DB：create_novel 后 registry 持久化，get_story_bible 读它且不泄漏为世界观"""
+        factory, ltm, _ = self._make_factory(tmp_path)
+        nid = factory._create_novel("测试", "都市", "", 100).split("novel_id=")[1].rstrip(")。")
+        reg = ltm.get_character_registry(nid)
+        assert "赵志龙" in reg and "林枫" in reg
+        bible = factory._get_story_bible(nid)
+        assert "赵志龙" in bible  # 权威名表里应含补全的配角
+        assert "authoritative_names" not in bible  # registry 不应泄漏进世界观核心
+
+    def test_multi_project_isolation(self, tmp_path):
+        """多项目隔离：不同小说各自用各自的源文档/名表，落库校验互不污染"""
+        from app.memory import LongTermMemory, ShortTermMemory, VectorStore
+        from app.tools import NovelMemoryTools
+
+        dir_a = tmp_path / "project_a"
+        dir_b = tmp_path / "project_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "人物角色与背景.txt").write_text(
+            "## 二、主要人物画像\n### 张三\n### 李四\n", encoding="utf-8")
+        (dir_b / "人物角色与背景.txt").write_text(
+            "## 二、主要人物画像\n### 王五\n### 赵六\n", encoding="utf-8")
+
+        ltm = LongTermMemory(str(tmp_path / "lt.db"))
+        stm = ShortTermMemory(str(tmp_path / "st.db"))
+        vs = VectorStore(str(tmp_path / "vec"))
+        factory = NovelMemoryTools(ltm, stm, vs)
+
+        nid_a = factory._create_novel("项目A", "都市", "", 100, source_dir=str(dir_a)).split("novel_id=")[1].rstrip(")。")
+        nid_b = factory._create_novel("项目B", "都市", "", 100, source_dir=str(dir_b)).split("novel_id=")[1].rstrip(")。")
+
+        names_a = factory._get_authoritative_names(nid_a)
+        names_b = factory._get_authoritative_names(nid_b)
+        assert "张三" in names_a and "王五" not in names_a
+        assert "王五" in names_b and "张三" not in names_b
+
+        # A 项目拒 B 项目的角色名，反之亦然；各自接受自己的角色名
+        assert "已拒绝" in factory._save_to_long_term(nid_a, "character", "王五", "内容", "{}")
+        assert "已拒绝" in factory._save_to_long_term(nid_b, "character", "张三", "内容", "{}")
+        assert "人物已保存" in factory._save_to_long_term(nid_a, "character", "张三", "内容", "{}")

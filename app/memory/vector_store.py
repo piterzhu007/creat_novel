@@ -10,6 +10,7 @@ RAG 实现说明：
 """
 
 import uuid
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -90,9 +91,12 @@ class VectorStore:
             settings=ChromaSettings(anonymized_telemetry=False),
         )
         self._ensure_collections()
+        # 后台写入队列：向量写入（含 embedding API 调用）不阻塞主流程
+        self._write_lock = threading.Lock()
+        self._enabled = self.embedding._client is not None
         logger.info(
             f"向量存储已初始化: {persist_dir} "
-            f"(embedding={'启用' if self.embedding._client else '未配置'})"
+            f"(embedding={'启用' if self._enabled else '未配置'})"
         )
 
     def _ensure_collections(self):
@@ -119,7 +123,7 @@ class VectorStore:
         参数:
             collection_name: collection 名
             content: 文本内容
-            metadata: 元数据
+            metadata: 元数据（应包含 novel_id，用于按小说过滤检索）
             doc_id: 文档ID（默认自动生成）
             embedding: 若已提供向量则直接用，否则调用 embedding API 生成
         """
@@ -141,6 +145,27 @@ class VectorStore:
             kwargs["embeddings"] = [embedding]
         collection.add(**kwargs)
         return doc_id
+
+    def add_background(self, collection_name: str, content: str,
+                       metadata: Optional[dict] = None, doc_id: Optional[str] = None):
+        """
+        后台写入：不阻塞主流程，embedding 失败静默。
+
+        保存侧（save_to_long_term/save_chapter）调用此方法同步维护向量索引，
+        避免 embedding API 调用拖慢主流程；失败不影响 SQLite 已持久化的数据。
+        """
+        if not self._enabled:
+            return
+
+        def _worker():
+            try:
+                with self._write_lock:
+                    self.add(collection_name, content, metadata=metadata, doc_id=doc_id)
+            except Exception as e:
+                logger.debug(f"向量后台写入失败（不影响主流程）: {e}")
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
 
     def add_batch(self, collection_name: str, contents: list[str],
                   metadatas: Optional[list[dict]] = None,
@@ -230,7 +255,9 @@ class VectorStore:
         self.get_collection(collection_name).delete(ids=[doc_id])
 
     def delete_by_filter(self, collection_name: str, where: dict):
-        """按条件删除"""
+        """按条件删除（多字段自动包装成 $and，因 ChromaDB delete 只接受单个 operator）"""
+        if len(where) > 1:
+            where = {"$and": [{k: v} for k, v in where.items()]}
         self.get_collection(collection_name).delete(where=where)
 
     def count(self, collection_name: str) -> int:

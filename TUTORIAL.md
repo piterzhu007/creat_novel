@@ -686,45 +686,46 @@ sub_agents = [
 ]
 ```
 
-**`create_novel_agent(...)`** (第 132-208 行)
+**`create_novel_agent(...)`** (第 201-265 行)
 
 主入口函数，按特定顺序初始化系统：
 
 ```python
-def create_novel_agent(ltm=None, stm=None, vs=None, checkpoint_db_path=None):
-    client = get_model_registry()   # ★ 获取模型注册表单例
+def create_novel_agent(checkpoint_db_path=None):
+    registry = get_model_registry()   # ★ 获取模型注册表单例
+    registry.warmup_models()
 
-    # 步骤 1：初始化记忆层
-    if ltm is None:
-        ltm = LongTermMemory()     # SQLite 长期记忆
-    if stm is None:
-        stm = ShortTermMemory()    # SQLite 短期记忆
-    if vs is None:
-        vs = VectorStore()         # ChromaDB 向量存储
+    # 步骤 1：通过 MCP 接口加载全部工具（单一大脑中枢，所有智能体共享）
+    all_tools = _load_mcp_tools()
 
-    # 步骤 2：创建工具集（闭包工厂）
-    memory_tools = NovelMemoryTools(ltm, stm, vs)
-    tools = memory_tools.get_tools()   # 返回 10 个 LangChain Tool
+    # 步骤 2：配置本地文件系统 backend（供 summarization 中间件做历史 offload）
+    fs_backend = FilesystemBackend(root_dir=str(PROJECT_ROOT), virtual_mode=False)
 
-    # 步骤 3：从注册表获取 Supervisor 模型（绑定到 deepseek_pro 槽位）
-    supervisor_model = client.get_supervisor_model()
+    # 步骤 3：构建 4 个子智能体（共享全部工具 + 各自配 summarization 压缩）
+    sub_agents = _build_sub_agents(all_tools, registry, fs_backend)
 
-    # 步骤 4：构建子智能体（各自从注册表获取模型）
-    sub_agents = _build_sub_agents(memory_tools, client)
-
-    # 步骤 5：可选 Checkpointer（保存对话历史）
+    # 步骤 4：可选 Checkpointer（AsyncSqliteSaver，配合 astream 异步运行）
     checkpointer = None
     if checkpoint_db_path:
-        conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
+        async def _make_saver():
+            conn = await aiosqlite.connect(checkpoint_db_path)
+            return AsyncSqliteSaver(conn)
+        checkpointer = run(_make_saver())
+
+    # 步骤 5：从代码层面禁用文件系统工具 + general-purpose 子智能体
+    _register_no_filesystem_profile()
 
     # 步骤 6：创建 Deep Agent（核心调用）
+    supervisor_model = registry.get_model("supervisor")
+    summarization_middleware = _build_summarization_middleware(supervisor_model, fs_backend)
     agent = create_deep_agent(
         model=supervisor_model,        # 主模型
-        tools=tools,                   # 主智能体的工具（全部 10 个）
+        tools=all_tools,               # 全部 22 个 MCP 工具
         system_prompt=SUPERVISOR_PROMPT, # Supervisor 系统提示词
         subagents=sub_agents,          # 4 个子智能体定义
         checkpointer=checkpointer,     # 对话持久化
+        backend=fs_backend,            # 文件系统 backend（offload 历史）
+        middleware=[summarization_middleware],  # 上下文压缩
         name="novel_supervisor",       # 图名称
     )
 
