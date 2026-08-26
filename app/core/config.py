@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     writer_temperature: float = Field(default=0.8, alias="WRITER_TEMPERATURE")
     editor_temperature: float = Field(default=0.2, alias="EDITOR_TEMPERATURE")
     reader_temperature: float = Field(default=0.5, alias="READER_TEMPERATURE")
-    supervisor_temperature: float = Field(default=0.3, alias="SUPERVISOR_TEMPERATURE")
+    supervisor_temperature: float = Field(default=0.1, alias="SUPERVISOR_TEMPERATURE")
 
     # ── 智能体 max_tokens（单次输出上限，按角色差异化）──
     # writer 写正文需要最大输出；editor/reader 只出报告，可设小值省成本

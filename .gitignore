@@ -27,13 +27,8 @@ ENV/
 *.swo
 *~
 
-# 本地数据
-data/*.db
-data/*.sqlite3
-data/novels/*
-data/vector_db/*
-!data/novels/.gitkeep
-!data/vector_db/.gitkeep
+# 本地数据（整个 data/ 都是运行时数据：数据库/WAL/会话/追踪/日志，绝不入库）
+data/
 
 # 智能体产出
 output/

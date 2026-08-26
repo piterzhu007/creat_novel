@@ -143,7 +143,9 @@ class VectorStore:
             kwargs["metadatas"] = [metadata]
         if embedding is not None:
             kwargs["embeddings"] = [embedding]
-        collection.add(**kwargs)
+        # upsert（而非 add）：同名/同 id 重复保存（如角色档案更新）时覆盖旧向量，
+        # 否则 ChromaDB 对已存在的 id 会抛「ID already exists」，导致向量库与唯一权威库脱节。
+        collection.upsert(**kwargs)
         return doc_id
 
     def add_background(self, collection_name: str, content: str,
@@ -184,7 +186,7 @@ class VectorStore:
             kwargs["metadatas"] = metadatas
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
-        collection.add(**kwargs)
+        collection.upsert(**kwargs)
         logger.debug(f"批量写入 {len(contents)} 条到 {collection_name}")
         return ids
 

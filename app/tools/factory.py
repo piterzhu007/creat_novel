@@ -19,7 +19,7 @@ from app.memory import LongTermMemory, ShortTermMemory, VectorStore
 # 从源头杜绝正文人名混乱。多项目隔离：不同项目各自用自己的名表派生，互不污染。
 # 用显式码点书写，避免简繁（风0x98CE/風0x98A8、枫0x67AB/楓0x6953）在源码里肉眼难辨。
 _CONFUSABLE_CHARS = {
-    "枫": ("峰", "风", "風", "楓", "栴"),  # 枫(U+67AB) ← 峰/风/風/楓/栴
+    "枫": ("峰", "风", "風", "楓", "栴", "凤", "鳳", "枤"),  # 枫(U+67AB) ← 含形近错字 枤(U+67A4)  # 枫(U+67AB) ← 峰/风/風/楓/栴/凤/鳳
     "荆": ("荊",),                          # 荆(U+8346) ← 荊(U+834A)
     "静": ("靖",),
     "晓": ("小",),
@@ -27,6 +27,18 @@ _CONFUSABLE_CHARS = {
     "桦": ("华",),
     "奕": ("亦",),
 }
+
+# 已知「错误全名 → 正确名」硬映射：模型幻觉级的角色名混淆（如把「林楓」写成「林白」），
+# 字符级易混淆表覆盖不到（不是字形/同音，是名字拼错）。写库/读库时全名精确替换，零误伤。
+_KNOWN_WRONG_NAMES = {
+    "林白": "林枫",  # 林白 → 林楓
+}
+
+
+# 受保护角色名（硬锁）：这些名字是全文唯一正确写法，禁止删除、禁止改名，
+# 任何角色名变体（同音/近形/简繁）一律在写库/读库时被强制回退为这里的正确写法。
+# 谁都无权更改——包括 supervisor。写库侧由 _save_to_long_term/_delete_long_term_entry 拦截。
+_PROTECTED_CHARACTER_NAMES = frozenset({"林枫"})  # 林+枫(U+67AB)：唯一正确写法，硬锁，谁都无权更改
 
 # 字段标签关键词：`**X**：` 粗体条目里若含这些词，说明是人物档案的字段标签
 # （外貌/身世/性格/动机/行为…），不是角色名。用「包含」判断而非「精确匹配」，
@@ -110,6 +122,9 @@ class NovelMemoryTools:
         note = ("（已自动纠正角色名：" + "；".join(corrections) + "）") if corrections else ""
 
         if category == "character":
+            # 名字硬锁：角色名若写成易混淆变体（林峰/林风/林鳳…），一律强制回退为权威写法（林楓）。
+            # 先纠名、再校验，保证「变体名 → 权威名」在写库侧就锁死，谁都无法把林楓改成别的写法。
+            name = self._fix_name_confusables(novel_id, name)
             # 权威名表硬校验：角色名必须精确匹配该小说的源文档角色名表，拦截音近/错字幻觉
             authoritative = self._get_authoritative_names(novel_id)
             if authoritative and name not in authoritative and not allow_new:
@@ -129,6 +144,13 @@ class NovelMemoryTools:
                 char_id = self._ltm.save_character(novel_id, profile, locked=locked)
             except ValueError as e:
                 return f"已拒绝：{e}"
+            # 同步唯一权威名表：角色一旦落库（源文档名表命中 或 supervisor 授权新增），
+            # 其名字即成为权威名表的一部分，写回 registry，保证名表与档案永不脱节。
+            auth = self._get_authoritative_names(novel_id)
+            if name not in auth:
+                auth.add(name)
+                self._ltm.save_character_registry(novel_id, sorted(auth))
+                self._authoritative_names_by_novel[novel_id] = auth
             # 同步写入向量库（后台，不阻塞），供语义检索
             self._vs.add_background(
                 "novel_characters",
@@ -329,10 +351,12 @@ class NovelMemoryTools:
             s = s or ""
             return s if len(s) <= n else s[:n] + "…"
 
-        data = [
-            {"分类": s.category, "名称": s.name, "描述": _truncate(s.description)}
-            for s in settings
-        ]
+        data = []
+        for s in settings:
+            # 「源文档事实清单」（category=canon）是事实核对基准，必须完整返回，不截断；
+            # 其余世界观条目仍精简截断，避免 token 浪费。
+            desc = s.description if s.category == "canon" else _truncate(s.description)
+            data.append({"分类": s.category, "名称": s.name, "描述": desc})
         return yaml.dump(data, allow_unicode=True, sort_keys=False)
 
     def _get_writing_context(self, novel_id: str, chapter_seq: int = 1) -> str:
@@ -481,19 +505,29 @@ class NovelMemoryTools:
         """获取某小说的权威角色名表（多项目隔离，按 novel_id 缓存）。
 
         优先从 registry 读（create_novel 时已落库）；registry 为空则回退到该小说
-        自己保存的「人物角色与背景.txt」源文档现场提取。这样落库校验始终生效，
-        且不同项目各自用各自的名表，不会串。
+        自己保存的「人物角色与背景.txt」源文档现场提取；再不行则退化为「已落库角色名」
+        （characters 表是唯一权威库）。这样落库校验始终生效，且不同项目各自用各自的名表。
+
+        自愈：一旦推导出名表就立即持久化回 registry，避免「registry 未落库 → 权威名表
+        为空 → 校验被整体跳过」的失效。
         """
         if novel_id in self._authoritative_names_by_novel:
             return self._authoritative_names_by_novel[novel_id]
 
         names = set(self._ltm.get_character_registry(novel_id))
         if not names:
-            # 回退：从该小说自己的源文档提取（源文档名含「人物」和「背景」）
+            # 回退 1：从该小说自己的源文档提取（源文档名含「人物」和「背景」）
             for doc_name, content in self._ltm.get_source_docs(novel_id):
                 if "人物" in doc_name and "背景" in doc_name:
                     names = self._extract_character_names(content)
                     break
+        if not names:
+            # 回退 2：源文档也未落库时，退化为「已落库角色名」（唯一权威库），
+            # 至少让已存在的正确角色名继续参与校验/纠错，不整体失效。
+            names = {c.name for c in self._ltm.get_characters(novel_id)}
+        if names:
+            # 自愈持久化：把推导出的名表写回 registry，作为唯一权威名表落库
+            self._ltm.save_character_registry(novel_id, sorted(names))
         self._authoritative_names_by_novel[novel_id] = names
         return names
 
@@ -526,6 +560,10 @@ class NovelMemoryTools:
             name: 条目名称（人物名/设定名/情节名/大纲标题）
         """
         if category == "character":
+            # 受保护角色名硬锁：先纠名（防止用变体名「林峰」绕过），再拒绝删除受保护名「林楓」。
+            name = self._fix_name_confusables(novel_id, name)
+            if name in _PROTECTED_CHARACTER_NAMES:
+                return f"「{name}」是受保护角色名，禁止删除/改名（谁都无权更改）。"
             n = self._ltm.delete_character(novel_id, name)
             if n:
                 self._vs.delete_by_filter("novel_characters", {"novel_id": novel_id, "name": name})
@@ -656,6 +694,12 @@ class NovelMemoryTools:
         """
         corrected = content
         corrections = []
+        # 0. 全名硬映射：纠正模型幻觉级的名字混淆（如「林白」→「林楓」），字符级易混淆表覆盖不到
+        for wrong, right in _KNOWN_WRONG_NAMES.items():
+            if wrong in corrected:
+                n = corrected.count(wrong)
+                corrected = corrected.replace(wrong, right)
+                corrections.append(f"「{wrong}」→「{right}」×{n}")
         for correct_name, variants in self._get_name_confusables(novel_id).items():
             for v in variants:
                 if v in corrected:

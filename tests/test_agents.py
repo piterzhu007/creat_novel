@@ -332,3 +332,14 @@ class TestNameConfusionGuard:
         assert "已拒绝" in factory._save_to_long_term(nid_a, "character", "王五", "内容", "{}")
         assert "已拒绝" in factory._save_to_long_term(nid_b, "character", "张三", "内容", "{}")
         assert "人物已保存" in factory._save_to_long_term(nid_a, "character", "张三", "内容", "{}")
+
+    def test_protected_name_hard_lock(self, tmp_path):
+        """受保护角色名（林楓）硬锁：谁都无权删除/改名，守卫早返回不落库"""
+        from app.tools.factory import _PROTECTED_CHARACTER_NAMES
+        factory, _, _ = self._make_factory(tmp_path)
+        nid = factory._create_novel("测试", "都市", "", 100).split("novel_id=")[1].rstrip(")。")
+        for p in _PROTECTED_CHARACTER_NAMES:
+            # 禁止删除受保护名（守卫早返回，不能报「已删除」）
+            msg = factory._delete_long_term_entry(nid, "character", p)
+            assert "禁止删除" in msg, f"受保护名 {p} 不应能删除"
+            assert "已删除" not in msg
